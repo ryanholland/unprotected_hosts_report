@@ -1,0 +1,265 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Creates resources need to generate reports of instances that do not have the Alert Logic agent running",
+
+  "Parameters": {
+    "S3Bucket": {
+      "Type": "String",
+      "Description": "Name of an existing bucket to use to store the reports"
+    },
+    "S3Path": {
+      "Type": "String",
+      "Description": "Optional path in S3 to store the reports.  Example: \"reports/\""
+    },
+    "WhitlistedTags": {
+      "Type": "String",
+      "Description": "Optional: Comma deliminated string of tag key names, instances which have any of tag specified will not show in the report if they do not have the agent installed.",
+    },
+    "IncludeProtected" : {
+      "Type" : "String",
+      "Default" : "False",
+      "AllowedValues" : ["True", "False"],
+      "Description" : "If set to True a second report will be generated that includes a list of the hosts that do have the agent installed and in the OK state"
+
+    },
+    "SubscribeEmail" : {
+      "Type" : "String",
+      "Description" : "Optional: Email address to subscribe to the SNS topic for report notification, additional email addresses can be added through the SNS console"
+    },
+    "EnableSchedule" : {
+      "Type" : "String",
+      "Default" : "Yes",
+      "AllowedValues" : ["Yes", "No"],
+      "Description" : "Create a AWS Event trigger to run the report daily"
+    }
+  },
+  "Conditions" : {
+    "HasSubscribeEmail" : {"Fn::Not": [{"Fn::Equals": ["", {"Ref": "SubscribeEmail"}]}]},
+    "CreateSchedule" : {"Fn::Equals" : ["Yes", {"Ref" : "EnableSchedule"}]}
+
+  },
+  "Resources": {
+    
+    
+
+
+
+
+
+    "ThreatManagerUnprotectedHostsRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "RoleName": "LambdaExecutionRole-GenerateUnprotectedHostsReport"
+      }
+    },
+    "LambdaExecutionPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "LambdaExecutionRole-GenerateUnprotectedHostsReport",
+        "Roles": [{
+          "Ref": "ThreatManagerUnprotectedHostsRole"
+        }],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [ 
+            {
+              "Sid": "WriteReportsToS3",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": [
+                {"Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "S3Bucket"}, "/",{"Ref": "S3Path"},"*"]]}
+              ]
+            },
+            {
+              "Effect" : "Allow",
+              "Action" : [
+                "ec2:DescribeRegions",
+                "ec2:DescribeInstances",
+                "ec2:DescribeTags"
+              ],
+              "Resource" : "*"
+            },
+              {
+              "Effect":"Allow",
+              "Action":"sns:Publish",
+              "Resource":{"Ref" : "ReportSNS"}
+              },
+   
+             {
+              "Effect": "Allow",
+              "Action": [
+                "logs:DescribeLogStreams",
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "arn:aws:logs:*:*:*"
+            }
+          ]
+        }
+      }
+    },
+    "ScheduledEventForReport": {
+      "Type": "AWS::Events::Rule",
+      "Condition" : "CreateSchedule",
+      "Properties": {
+        "Description": "Scheduled event to generate a report of unprotected hosts daily",
+        "ScheduleExpression": "cron(0 1 * * ? *)",
+        "State": "ENABLED",
+        "Targets": [{
+          "Arn": { "Fn::GetAtt": ["GenerateReportLambda", "Arn"] },
+          "Id": "TriggerGenerateReportLambda"
+        }]
+      }
+    },
+    "PermissionForEventsToInvokeLambda": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": { "Ref": "GenerateReportLambda" },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": { "Fn::GetAtt": ["ScheduledEventForReport", "Arn"] }
+      }
+    },
+    "GenerateReportLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Handler": "unprotected_hosts_report.lambda_handler",
+        "Description": "Function to generate reports for instances that do not have the Alert Logic agent",
+        "Environment": {
+          "Variables": {
+            "S3PATH": {
+              "Ref": "S3Path"
+            },
+            "S3BUCKET": {
+              "Ref": "S3Bucket"
+            },
+            "INCLUDE_PROTECTED": {
+              "Ref": "IncludeProtected"
+            },
+           
+            "WHITELIST_TAGS" : {"Ref" : "WhitlistedTags"},
+            "AL_API_KEY": "",
+            "SNS_TOPIC" : {"Ref" : "ReportSNS"}
+
+          }
+        },
+        "Role": {
+          "Fn::GetAtt": [
+            "ThreatManagerUnprotectedHostsRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": "alsalesdemoenvironment",
+          "S3Key": "unprotected_hosts_report.zip"
+        },
+        "KmsKeyArn" : {"Fn::GetAtt" : ["ALAPIKMSKey", "Arn"] },
+        "MemorySize" : 1024, 
+        "Runtime": "python2.7",
+        "Timeout": "300"
+      }
+
+    },
+    "ReportSNS" : {
+      "Type" : "AWS::SNS::Topic",
+      "Properties" : {
+        "DisplayName" : "SNS Topic for Unprotected Hosts",
+        "TopicName" : "UnprotectedInstances"
+      }
+    },
+    "SubscribeSNS" : {
+      "Type" :  "AWS::SNS::Subscription",
+      "Condition" : "HasSubscribeEmail",
+      "Properties" : {
+        "Endpoint" : {"Ref" : "SubscribeEmail"},
+        "Protocol" : "email",
+        "TopicArn" : {"Ref" : "ReportSNS"}
+      }
+    },
+    "ALAPIKMSKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "KMS Key to protect Alert Logic API Key",
+        "Enabled": true,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Id": "key-default-1",
+          "Statement": [{
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::Join": ["", ["arn:aws:iam::", {
+                  "Ref": "AWS::AccountId"
+                }, ":root"]]
+              }
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+          }, {
+            "Sid": "Allow use of the key for decryption.",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::GetAtt": [
+                  "ThreatManagerUnprotectedHostsRole",
+                  "Arn"
+                ]
+              }
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:ReEncrypt*",
+              "kms:GenerateDataKey*",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*"
+          }, {
+            "Sid": "Allow attachment of persistent resources",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::GetAtt": [
+                  "ThreatManagerUnprotectedHostsRole",
+                  "Arn"
+                ]
+              }
+            },
+            "Action": [
+              "kms:CreateGrant",
+              "kms:ListGrants",
+              "kms:RevokeGrant"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "Bool": {
+                "kms:GrantIsForAWSResource": "true"
+              }
+            }
+          }]
+        }
+      }
+    }
+  }, 
+  "Outputs" : {
+    "KMSKeyAlias" : {
+      "Description" : "KMS Key Alias that needs to be selected and used to encrypt your Alert Logic API Key",
+      "Value" : {"Ref" : "ALAPIKMSKey"}
+  }
+}
+}
