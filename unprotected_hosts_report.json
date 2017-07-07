@@ -127,6 +127,7 @@
     },
     "PermissionForEventsToInvokeLambda": {
       "Type": "AWS::Lambda::Permission",
+      "Condition" : "CreateSchedule",
       "Properties": {
         "FunctionName": { "Ref": "GenerateReportLambda" },
         "Action": "lambda:InvokeFunction",
